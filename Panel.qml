@@ -370,14 +370,14 @@ Panel {
       Item {
         TunnelsMark {
           anchors.centerIn: parent
-          size: Style.bar.iconCanvas
+          // Sized to the bar's icon font, so it sits level with the glyph icons.
+          size: Style.bar.iconFont
           color: button.foreground
         }
       }
     }
     // Dims by alpha, not by darkening, so the cue survives light bars.
     foreground: vpn.connectedCount > 0 ? vpn.barForeground : vpn.tint(vpn.barForeground, 0.45)
-    tooltipText: vpn.tooltip()
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.MiddleButton) vpn.select(vpn.providerIndex + 1)
       else if (buttonCode === Qt.RightButton) vpn.refreshAll()
