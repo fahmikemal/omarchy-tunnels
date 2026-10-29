@@ -1,100 +1,243 @@
-#!/usr/bin/env bash
-# ZeroTier's local service API for the Tunnels bar widget.
-#
-#   zt-api snapshot      {"auth": ok|missing|rejected|down, status, networks, peers}
-#   zt-api join <id>     join a network
-#   zt-api leave <id>    leave a network
-#   zt-api orbit <moon> <seed>   orbit a moon (self-hosted roots)
-#   zt-api deorbit <moon>        stop orbiting it
-#   zt-api grant         copy the service's API token into the keyring (polkit)
-#
-# The token never touches argv: it lives in the keyring and reaches curl as a
-# header read from stdin.
-set -uo pipefail
+#!/usr/bin/env python3
+"""ZeroTier's local service API for the Tunnels bar widget.
 
-SERVICE="omarchy-tunnels"
-ACCOUNT="zerotier"
-HOME_DIR="${ZT_HOME:-/var/lib/zerotier-one}"
-PORT="$(cat "$HOME_DIR/zerotier-one.port" 2>/dev/null || echo 9993)"
-API="http://127.0.0.1:${PORT//[^0-9]/}"
+    zt-api snapshot              {"auth": ok|missing|rejected|down|error, status, networks, peers, moons}
+    zt-api join <id>             join a network
+    zt-api leave <id>            leave a network
+    zt-api orbit <moon> <seed>   orbit a moon (self-hosted roots)
+    zt-api deorbit <moon>        stop orbiting it
+    zt-api grant                 copy the service's API token into the keyring (polkit)
 
-token() {
-  secret-tool lookup service "$SERVICE" username "$ACCOUNT" 2>/dev/null | tr -d '\r\n'
-}
+ZeroTier's API is plain HTTP on a loopback port above 1024, and its token is
+root-equivalent for the service. While zerotier-one is stopped any local
+account can bind that port, so the token is only ever written to a connection
+whose server end belongs to the running zerotier-one service:
 
-# call METHOD PATH -> prints body, then the HTTP code on the last line.
-# Exit 3 = no token, 7 = service unreachable (curl's own code).
-call() {
-  local t
-  t="$(token)"
-  [[ -n "$t" ]] || return 3
-  printf 'X-ZT1-Auth: %s\n' "$t" |
-    curl -sS --max-time 4 -X "$1" -H @- -H 'Content-Type: application/json' \
-      ${3:+--data "$3"} -w '\n%{http_code}' "$API$2" 2>/dev/null
-}
+1. With no running service (systemd's MainPID is 0) this reports "down"
+   without reading the token or opening a connection.
+2. Otherwise it connects, and before sending a byte finds the server's side of
+   that very connection in /proc/net/tcp and requires its owner to be the
+   service's uid or root. The request, token included, then goes over the same
+   connection, so nothing can take the port between the check and the send.
 
-emit() {
-  jq -cn --arg auth "$1" --arg error "${2:-}" '{auth: $auth, error: $error}'
-}
+The token never touches argv: it reaches this script on secret-tool's stdout.
+"""
+import http.client
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
 
-snapshot() {
-  local out code status networks peers moons
-  out="$(call GET /status)"
-  case $? in
-    0) ;;
-    3) emit missing; return ;;
-    *) emit down; return ;;
-  esac
-  code="${out##*$'\n'}"
-  status="${out%$'\n'*}"
-  case "$code" in
-    200) ;;
-    401|403) emit rejected; return ;;
-    *) emit error "ZeroTier answered HTTP $code"; return ;;
-  esac
-  out="$(call GET /network)" && networks="${out%$'\n'*}" || networks="[]"
-  out="$(call GET /peer)" && peers="${out%$'\n'*}" || peers="[]"
-  out="$(call GET /moon)" && moons="${out%$'\n'*}" || moons="[]"
-  jq -cn --argjson status "$status" --argjson networks "${networks:-[]}" --argjson peers "${peers:-[]}" \
-    --argjson moons "${moons:-[]}" \
-    '{auth: "ok", status: $status, networks: $networks, peers: $peers, moons: $moons}' 2>/dev/null ||
-    emit error "ZeroTier returned unreadable JSON"
-}
+KEYRING = ["service", "omarchy-tunnels", "username", "zerotier"]
+ZT_HOME = os.environ.get("ZT_HOME", "/var/lib/zerotier-one")
+UNIT = "zerotier-one.service"
+TIMEOUT = 4
 
-network() {
-  local method="$1" id="${2:-}" out code
-  [[ "$id" =~ ^[0-9a-fA-F]{16}$ ]] || { echo "Not a network id: $id" >&2; return 2; }
-  out="$(call "$method" "/network/$id" '{}')" || { echo "ZeroTier service unreachable" >&2; return 1; }
-  code="${out##*$'\n'}"
-  [[ "$code" == 200 ]] || { echo "ZeroTier answered HTTP $code" >&2; return 1; }
-}
 
-moon() {
-  local method="$1" id="${2:-}" seed="${3:-}" body="{}" out code
-  [[ "$id" =~ ^[0-9a-fA-F]{10}$ ]] || { echo "Not a moon id: $id" >&2; return 2; }
-  if [[ "$method" == POST ]]; then
-    [[ "$seed" =~ ^[0-9a-fA-F]{10}$ ]] || { echo "Not a seed node id: $seed" >&2; return 2; }
-    body="{\"seed\":\"$seed\"}"
-  fi
-  out="$(call "$method" "/moon/$id" "$body")" || { echo "ZeroTier service unreachable" >&2; return 1; }
-  code="${out##*$'\n'}"
-  [[ "$code" == 200 ]] || { echo "ZeroTier answered HTTP $code" >&2; return 1; }
-}
+class Down(Exception):
+    """The ZeroTier service is not running or not accepting connections."""
 
-grant() {
-  local t
-  t="$(pkexec cat "$HOME_DIR/authtoken.secret" | tr -d '\r\n')"
-  [[ -n "$t" ]] || { echo "Access was not granted" >&2; return 1; }
-  printf '%s' "$t" | secret-tool store --label="ZeroTier API token (omarchy-tunnels)" \
-    service "$SERVICE" username "$ACCOUNT"
-}
 
-case "${1:-}" in
-  snapshot) snapshot ;;
-  join) network POST "${2:-}" ;;
-  leave) network DELETE "${2:-}" ;;
-  orbit) moon POST "${2:-}" "${3:-}" ;;
-  deorbit) moon DELETE "${2:-}" ;;
-  grant) grant ;;
-  *) echo "usage: zt-api snapshot|join <id>|leave <id>|orbit <moon> <seed>|deorbit <moon>|grant" >&2; exit 2 ;;
-esac
+class NoToken(Exception):
+    """The keyring holds no API token yet."""
+
+
+class Untrusted(Exception):
+    """Something other than the ZeroTier service holds its API port."""
+
+
+def api_port():
+    try:
+        with open(os.path.join(ZT_HOME, "zerotier-one.port")) as f:
+            port = int(f.read().strip())
+        if 0 < port < 65536:
+            return port
+    except (OSError, ValueError):
+        pass
+    return 9993
+
+
+def service_uids():
+    """The uids allowed to own the API socket, or None if the service isn't running.
+
+    zerotier-one starts as root and drops to its own user, so its sockets are
+    owned by one or the other; neither is open to an ordinary local account.
+    """
+    pid = subprocess.run(
+        ["systemctl", "show", "--property=MainPID", "--value", UNIT],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    if not pid.isdigit() or int(pid) == 0:
+        return None
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("Uid:"):
+                    real, effective = line.split()[1:3]
+                    return {0, int(real), int(effective)}
+    except OSError:
+        pass
+    return None
+
+
+def proc_address(host, port):
+    """An IPv4 endpoint the way /proc/net/tcp prints it: host bytes reversed, port as is."""
+    return f"{socket.inet_aton(host)[::-1].hex().upper()}:{port:04X}"
+
+
+def verified_connection(port, uids):
+    """Connect to the API and return the socket only if the service is on the other end."""
+    try:
+        sock = socket.create_connection(("127.0.0.1", port), timeout=TIMEOUT)
+    except OSError as e:
+        raise Down() from e
+    server_end = (proc_address("127.0.0.1", port), proc_address("127.0.0.1", sock.getsockname()[1]))
+    try:
+        with open("/proc/net/tcp") as f:
+            next(f)
+            for line in f:
+                fields = line.split()
+                if (fields[1], fields[2]) == server_end and int(fields[7]) in uids:
+                    return sock
+    except OSError:
+        pass
+    sock.close()
+    raise Untrusted()
+
+
+def token():
+    out = subprocess.run(["secret-tool", "lookup", *KEYRING], capture_output=True, text=True).stdout
+    return out.strip()
+
+
+def call(method, path, body=None):
+    """One API request over a verified connection: (HTTP status, response body)."""
+    uids = service_uids()
+    if uids is None:
+        raise Down()
+    port = api_port()
+    sock = verified_connection(port, uids)
+    secret = token()
+    if not secret:
+        sock.close()
+        raise NoToken()
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=TIMEOUT)
+    conn.sock = sock  # the verified connection; HTTPConnection must not open its own
+    headers = {"X-ZT1-Auth": secret}
+    data = None
+    if body is not None:
+        data = json.dumps(body)
+        headers["Content-Type"] = "application/json"
+    try:
+        conn.request(method, path, body=data, headers=headers)
+        response = conn.getresponse()
+        return response.status, response.read()
+    except (OSError, http.client.HTTPException) as e:
+        raise Down() from e
+    finally:
+        conn.close()
+
+
+def emit(**record):
+    print(json.dumps(record, separators=(",", ":")))
+
+
+def snapshot():
+    try:
+        code, status = call("GET", "/status")
+    except Down:
+        return emit(auth="down", error="")
+    except NoToken:
+        return emit(auth="missing", error="")
+    except Untrusted:
+        return emit(auth="error", error="Something other than ZeroTier holds its API port; the token was not sent")
+    if code in (401, 403):
+        return emit(auth="rejected", error="")
+    if code != 200:
+        return emit(auth="error", error=f"ZeroTier answered HTTP {code}")
+
+    def listing(path):
+        try:
+            code, body = call("GET", path)
+            return json.loads(body) if code == 200 else []
+        except (Down, NoToken, Untrusted, ValueError):
+            return []
+
+    try:
+        status = json.loads(status)
+    except ValueError:
+        return emit(auth="error", error="ZeroTier returned unreadable JSON")
+    emit(auth="ok", status=status, networks=listing("/network"), peers=listing("/peer"), moons=listing("/moon"))
+
+
+def act(method, path, body=None):
+    try:
+        code, _ = call(method, path, body)
+    except Down:
+        sys.exit("ZeroTier service unreachable")
+    except NoToken:
+        sys.exit("No ZeroTier API token yet; grant access first")
+    except Untrusted:
+        sys.exit("Something other than ZeroTier holds its API port; the token was not sent")
+    if code != 200:
+        sys.exit(f"ZeroTier answered HTTP {code}")
+
+
+def network(method, network_id):
+    if not re.fullmatch(r"[0-9a-fA-F]{16}", network_id or ""):
+        print(f"Not a network id: {network_id}", file=sys.stderr)
+        sys.exit(2)
+    act(method, f"/network/{network_id}", {})
+
+
+def moon(method, moon_id, seed=None):
+    if not re.fullmatch(r"[0-9a-fA-F]{10}", moon_id or ""):
+        print(f"Not a moon id: {moon_id}", file=sys.stderr)
+        sys.exit(2)
+    body = {}
+    if method == "POST":
+        if not re.fullmatch(r"[0-9a-fA-F]{10}", seed or ""):
+            print(f"Not a seed node id: {seed}", file=sys.stderr)
+            sys.exit(2)
+        body = {"seed": seed}
+    act(method, f"/moon/{moon_id}", body)
+
+
+def grant():
+    secret = subprocess.run(
+        ["pkexec", "cat", os.path.join(ZT_HOME, "authtoken.secret")],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    if not secret:
+        sys.exit("Access was not granted")
+    stored = subprocess.run(
+        ["secret-tool", "store", "--label=ZeroTier API token (omarchy-tunnels)", *KEYRING],
+        input=secret, text=True,
+    )
+    sys.exit(stored.returncode)
+
+
+def main(args):
+    command = args[0] if args else ""
+    arg = lambda i: args[i] if len(args) > i else ""
+    if command == "snapshot":
+        snapshot()
+    elif command == "join":
+        network("POST", arg(1))
+    elif command == "leave":
+        network("DELETE", arg(1))
+    elif command == "orbit":
+        moon("POST", arg(1), arg(2))
+    elif command == "deorbit":
+        moon("DELETE", arg(1))
+    elif command == "grant":
+        grant()
+    else:
+        print("usage: zt-api snapshot|join <id>|leave <id>|orbit <moon> <seed>|deorbit <moon>|grant", file=sys.stderr)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

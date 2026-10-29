@@ -33,7 +33,7 @@ Provider {
     return decodeURIComponent(path)
   }
 
-  function statusArgv() { return ["bash", api, "snapshot"] }
+  function statusArgv() { return ["python3", api, "snapshot"] }
   function parseStatus(code, out, err) { return Model.zerotierSnapshot(out) }
 
   function statusLine() {
@@ -44,16 +44,16 @@ Provider {
 
   function turnOn() { startService() }
   function turnOff() { run(["systemctl", "stop", serviceUnit], "Stopping ZeroTier…", "ZeroTier service stopped") }
-  function setup() { run(["bash", api, "grant"], "Waiting for authorization…", "ZeroTier access granted") }
+  function setup() { run(["python3", api, "grant"], "Waiting for authorization…", "ZeroTier access granted") }
 
   function rowAction(row, actionId) {
-    if (actionId === "leave" && row) run(["bash", api, "leave", row.key], "Leaving " + row.name + "…", "Left " + row.name)
+    if (actionId === "leave" && row) run(["python3", api, "leave", row.key], "Leaving " + row.name + "…", "Left " + row.name)
   }
 
   // The planet is not optional; moons can be left.
   function removeServer(row) {
     if (row.key === "planet") return
-    run(["bash", api, "deorbit", row.key], "Leaving moon " + row.key + "…", "Left moon " + row.key)
+    run(["python3", api, "deorbit", row.key], "Leaving moon " + row.key + "…", "Left moon " + row.key)
   }
 
   function addServer(first, second) {
@@ -61,13 +61,13 @@ Provider {
     var seed = String(second || "").trim().toLowerCase() || moon
     if (!Model.isNodeId(moon)) return "A moon ID is 10 hex characters"
     if (!Model.isNodeId(seed)) return "A seed node ID is 10 hex characters"
-    return run(["bash", api, "orbit", moon, seed], "Orbiting " + moon + "…", "Orbiting moon " + moon) ? "" : "Busy, try again in a moment"
+    return run(["python3", api, "orbit", moon, seed], "Orbiting " + moon + "…", "Orbiting moon " + moon) ? "" : "Busy, try again in a moment"
   }
 
   function join(networkId) {
     var id = String(networkId || "").trim().toLowerCase()
     if (!Model.isNetworkId(id)) return flash("A network ID is 16 hex characters", true)
-    run(["bash", api, "join", id], "Joining " + id + "…",
+    run(["python3", api, "join", id], "Joining " + id + "…",
         "Joined " + id + " — authorize this device in ZeroTier Central if the network is private")
   }
 }

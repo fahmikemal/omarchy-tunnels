@@ -33,7 +33,7 @@ a VPN adds or drops its tab without restarting the shell.
 |---|---|
 | `tailscale`, `netbird`, `zerotier-cli` | Whichever VPNs you use; each is optional |
 | `wl-copy` (wl-clipboard) | Copying addresses |
-| `curl`, `jq`, `secret-tool` (libsecret) and a running keyring | The ZeroTier tab |
+| `python3`, `secret-tool` (libsecret) and a running keyring | The ZeroTier tab |
 | polkit (Omarchy's shell agent) | The one-time grants and starting or stopping services, below |
 
 ## Privileges
@@ -43,8 +43,14 @@ when you press the button that needs it:
 
 - **ZeroTier "Grant access"** runs `pkexec cat /var/lib/zerotier-one/authtoken.secret`
   and stores the token in your keyring (`secret-tool`, service
-  `omarchy-tunnels`, user `zerotier`). `bin/zt-api` reads it from there and
-  passes it to `curl` on stdin, never in argv, and only to `127.0.0.1`.
+  `omarchy-tunnels`, user `zerotier`). `bin/zt-api` reads it from there, never
+  through argv, and sends it only to the ZeroTier service itself: with
+  `zerotier-one` stopped it reads no token and opens no connection, and
+  otherwise it connects to `127.0.0.1` first and, before sending anything,
+  checks in `/proc/net/tcp` that the server end of that connection belongs to
+  the service's user or root, then sends the request over that same
+  connection. Another local account that takes the port while ZeroTier is down
+  gets nothing.
 - **Tailscale "Allow"** (shown when your user is not Tailscale's operator)
   runs `pkexec tailscale set --operator=$USER`.
 - **Start service / the ZeroTier switch** run `systemctl start|stop` on
