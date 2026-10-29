@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.fahmikemal.tunnels",
+  "name": "Tunnels",
+  "version": "1.0.0",
+  "author": "fahmikemal",
+  "license": "MIT",
+  "description": "Tailscale, NetBird and ZeroTier behind one bar icon: a tab per installed VPN, official or self-hosted servers. Unofficial; not affiliated with any VPN vendor.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Tunnels",
+    "description": "One tab per installed VPN: connect, sign in, switch between official and self-hosted servers, browse machines and networks, copy addresses. Hides itself when no VPN is installed.",
+    "category": "Network",
+    "icon": "assets/icon.svg",
+    "aliases": [
+      "vpn",
+      "tailscale",
+      "headscale",
+      "netbird",
+      "zerotier",
+      "tunnels"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "defaultTab": "",
+      "panelWidth": 400
+    },
+    "schema": [
+      {
+        "key": "defaultTab",
+        "type": "enum",
+        "label": "Tab shown first",
+        "options": ["", "tailscale", "netbird", "zerotier"],
+        "defaultValue": ""
+      },
+      {
+        "key": "panelWidth",
+        "type": "integer",
+        "label": "Panel width",
+        "description": "Scaled with the theme's spacing and capped to the screen.",
+        "min": 300,
+        "max": 640,
+        "step": 10,
+        "defaultValue": 400
+      }
+    ]
+  }
+}

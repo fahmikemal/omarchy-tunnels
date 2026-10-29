@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# ZeroTier's local service API for the Tunnels bar widget.
+#
+#   zt-api snapshot      {"auth": ok|missing|rejected|down, status, networks, peers}
+#   zt-api join <id>     join a network
+#   zt-api leave <id>    leave a network
+#   zt-api orbit <moon> <seed>   orbit a moon (self-hosted roots)
+#   zt-api deorbit <moon>        stop orbiting it
+#   zt-api grant         copy the service's API token into the keyring (polkit)
+#
+# The token never touches argv: it lives in the keyring and reaches curl as a
+# header read from stdin.
+set -uo pipefail
+
+SERVICE="omarchy-tunnels"
+ACCOUNT="zerotier"
+HOME_DIR="${ZT_HOME:-/var/lib/zerotier-one}"
+PORT="$(cat "$HOME_DIR/zerotier-one.port" 2>/dev/null || echo 9993)"
+API="http://127.0.0.1:${PORT//[^0-9]/}"
+
+token() {
+  secret-tool lookup service "$SERVICE" username "$ACCOUNT" 2>/dev/null | tr -d '\r\n'
+}
+
+# call METHOD PATH -> prints body, then the HTTP code on the last line.
+# Exit 3 = no token, 7 = service unreachable (curl's own code).
+call() {
+  local t
+  t="$(token)"
+  [[ -n "$t" ]] || return 3
+  printf 'X-ZT1-Auth: %s\n' "$t" |
+    curl -sS --max-time 4 -X "$1" -H @- -H 'Content-Type: application/json' \
+      ${3:+--data "$3"} -w '\n%{http_code}' "$API$2" 2>/dev/null
+}
+
+emit() {
+  jq -cn --arg auth "$1" --arg error "${2:-}" '{auth: $auth, error: $error}'
+}
+
+snapshot() {
+  local out code status networks peers moons
+  out="$(call GET /status)"
+  case $? in
+    0) ;;
+    3) emit missing; return ;;
+    *) emit down; return ;;
+  esac
+  code="${out##*$'\n'}"
+  status="${out%$'\n'*}"
+  case "$code" in
+    200) ;;
+    401|403) emit rejected; return ;;
+    *) emit error "ZeroTier answered HTTP $code"; return ;;
+  esac
+  out="$(call GET /network)" && networks="${out%$'\n'*}" || networks="[]"
+  out="$(call GET /peer)" && peers="${out%$'\n'*}" || peers="[]"
+  out="$(call GET /moon)" && moons="${out%$'\n'*}" || moons="[]"
+  jq -cn --argjson status "$status" --argjson networks "${networks:-[]}" --argjson peers "${peers:-[]}" \
+    --argjson moons "${moons:-[]}" \
+    '{auth: "ok", status: $status, networks: $networks, peers: $peers, moons: $moons}' 2>/dev/null ||
+    emit error "ZeroTier returned unreadable JSON"
+}
+
+network() {
+  local method="$1" id="${2:-}" out code
+  [[ "$id" =~ ^[0-9a-fA-F]{16}$ ]] || { echo "Not a network id: $id" >&2; return 2; }
+  out="$(call "$method" "/network/$id" '{}')" || { echo "ZeroTier service unreachable" >&2; return 1; }
+  code="${out##*$'\n'}"
+  [[ "$code" == 200 ]] || { echo "ZeroTier answered HTTP $code" >&2; return 1; }
+}
+
+moon() {
+  local method="$1" id="${2:-}" seed="${3:-}" body="{}" out code
+  [[ "$id" =~ ^[0-9a-fA-F]{10}$ ]] || { echo "Not a moon id: $id" >&2; return 2; }
+  if [[ "$method" == POST ]]; then
+    [[ "$seed" =~ ^[0-9a-fA-F]{10}$ ]] || { echo "Not a seed node id: $seed" >&2; return 2; }
+    body="{\"seed\":\"$seed\"}"
+  fi
+  out="$(call "$method" "/moon/$id" "$body")" || { echo "ZeroTier service unreachable" >&2; return 1; }
+  code="${out##*$'\n'}"
+  [[ "$code" == 200 ]] || { echo "ZeroTier answered HTTP $code" >&2; return 1; }
+}
+
+grant() {
+  local t
+  t="$(pkexec cat "$HOME_DIR/authtoken.secret" | tr -d '\r\n')"
+  [[ -n "$t" ]] || { echo "Access was not granted" >&2; return 1; }
+  printf '%s' "$t" | secret-tool store --label="ZeroTier API token (omarchy-tunnels)" \
+    service "$SERVICE" username "$ACCOUNT"
+}
+
+case "${1:-}" in
+  snapshot) snapshot ;;
+  join) network POST "${2:-}" ;;
+  leave) network DELETE "${2:-}" ;;
+  orbit) moon POST "${2:-}" "${3:-}" ;;
+  deorbit) moon DELETE "${2:-}" ;;
+  grant) grant ;;
+  *) echo "usage: zt-api snapshot|join <id>|leave <id>|orbit <moon> <seed>|deorbit <moon>|grant" >&2; exit 2 ;;
+esac
