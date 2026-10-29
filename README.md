@@ -7,6 +7,9 @@ leaving the bar.
 
 ![Tunnels](preview.png)
 
+*Top: Windows XP theme, bar at the bottom. Bottom: Tokyo Night, bar at the
+top. Both use demo mode's sample data.*
+
 *Unofficial. Not affiliated with or endorsed by Tailscale Inc., NetBird
 GmbH, or ZeroTier Inc.; their marks belong to them and are used here only
 to tell the tabs apart.*
