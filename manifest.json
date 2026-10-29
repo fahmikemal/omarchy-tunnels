@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.fahmikemal.tunnels",
   "name": "Tunnels",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "author": "fahmikemal",
   "license": "MIT",
   "description": "Tailscale, NetBird and ZeroTier behind one bar icon: a tab per installed VPN, official or self-hosted servers. Unofficial; not affiliated with any VPN vendor.",
